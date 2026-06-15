@@ -1,0 +1,29 @@
+# Target
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- Console: keep it OFF the TinyUSB data interface ---
+# Route the log/console to UART so the CDC interface is dedicated to the HSM
+# protocol. (Default UART0 console is fine.)
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# --- TinyUSB CDC ---
+CONFIG_TINYUSB_CDC_ENABLED=y
+CONFIG_TINYUSB_CDC_RX_BUFSIZE=1024
+CONFIG_TINYUSB_CDC_TX_BUFSIZE=2048
+
+# --- mbedTLS: ensure AES-GCM + HKDF available (defaults usually on) ---
+CONFIG_MBEDTLS_GCM_C=y
+CONFIG_MBEDTLS_HKDF_C=y
+CONFIG_MBEDTLS_HARDWARE_AES=y
+
+# --- Partition table (custom: adds nvs_keys for NVS encryption) ---
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- Flash encryption (DEVELOPMENT mode here; switch to RELEASE for prod) ---
+# These take effect only after you enable flash encryption on the device.
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT=y
+
+# --- NVS encryption (private keys at rest) ---
+CONFIG_NVS_ENCRYPTION=y

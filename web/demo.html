@@ -1,0 +1,94 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ESP32-S3 HSM — Web Serial test harness</title>
+<style>
+  body { font: 14px/1.5 ui-monospace, monospace; max-width: 820px; margin: 2rem auto; padding: 0 1rem; }
+  button { font: inherit; padding: .4rem .7rem; margin: .2rem .2rem .2rem 0; cursor: pointer; }
+  input { font: inherit; padding: .3rem; width: 100%; box-sizing: border-box; }
+  #log { white-space: pre-wrap; background: #111; color: #0f0; padding: 1rem; border-radius: 6px; min-height: 8rem; }
+  .row { margin: .6rem 0; }
+  .warn { color: #b00; }
+</style>
+<h1>ESP32-S3 HSM — test harness</h1>
+<p class="warn">Requires Chrome/Edge (Web Serial). Connect the ESP32-S3 over USB first.</p>
+
+<div class="row">
+  <button id="connect">Connect</button>
+  <button id="pub" disabled>GET_PUBKEY</button>
+  <button id="ratchet" disabled>RATCHET_ADVANCE</button>
+</div>
+<div class="row">
+  <label>Peer X25519 pubkey (hex, 64 chars):</label>
+  <input id="peer" placeholder="paste the other device's x25519 pubkey">
+  <button id="derive" disabled>DERIVE_SESSION</button>
+</div>
+<div class="row">
+  <label>Plaintext to round-trip (device-side AEAD, Diseño A):</label>
+  <input id="msg" value="hola mundo">
+  <button id="roundtrip" disabled>ENCRYPT → DECRYPT</button>
+</div>
+<div class="row">
+  <button id="sign" disabled>SIGN_CHALLENGE (random 32B)</button>
+</div>
+
+<h3>Log</h3>
+<div id="log"></div>
+
+<script type="module">
+import { HsmSerial } from "./hsm-serial.js";
+const hex = d => Array.from(d).map(b => b.toString(16).padStart(2, "0")).join("");
+const fromHex = s => new Uint8Array(s.trim().match(/.{1,2}/g).map(b => parseInt(b, 16)));
+const logEl = document.getElementById("log");
+const log = (...a) => { logEl.textContent += a.join(" ") + "\n"; };
+
+const hsm = new HsmSerial();
+const enable = on => ["pub","ratchet","derive","roundtrip","sign"].forEach(id => document.getElementById(id).disabled = !on);
+
+document.getElementById("connect").onclick = async () => {
+  try {
+    await hsm.connect();
+    hsm.onDisconnect(() => { log("⚠ HSM disconnected — panic-wipe would fire here (Fase 5)"); enable(false); });
+    log("connected.");
+    enable(true);
+  } catch (e) { log("connect failed:", e.message); }
+};
+
+document.getElementById("pub").onclick = async () => {
+  const k = await hsm.getPubkeys();
+  log("x25519 :", hex(k.x25519));
+  log("ed25519:", hex(k.ed25519));
+};
+
+document.getElementById("derive").onclick = async () => {
+  try {
+    const peer = fromHex(document.getElementById("peer").value);
+    if (peer.length !== 32) return log("peer pubkey must be 32 bytes (64 hex chars)");
+    const { sendKey, recvKey } = await hsm.deriveSession(peer);
+    log("sendKey:", hex(sendKey));
+    log("recvKey:", hex(recvKey));
+  } catch (e) { log("derive failed:", e.message); }
+};
+
+document.getElementById("roundtrip").onclick = async () => {
+  try {
+    const pt = new TextEncoder().encode(document.getElementById("msg").value);
+    const { nonce, ciphertext, tag } = await hsm.encrypt(pt);
+    log("enc nonce:", hex(nonce), "ct:", hex(ciphertext), "tag:", hex(tag));
+    // NOTE: device decrypt uses recvKey; encrypt used sendKey. A self
+    // round-trip only works between two devices, not one. Shown for wire test.
+    log("(self-decrypt will fail by design: send!=recv key — needs a second device)");
+  } catch (e) { log("encrypt failed:", e.message); }
+};
+
+document.getElementById("ratchet").onclick = async () => {
+  const gen = await hsm.ratchetAdvance();
+  log("ratchet advanced, gen =", gen);
+};
+
+document.getElementById("sign").onclick = async () => {
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const sig = await hsm.signChallenge(challenge);
+  log("challenge:", hex(challenge));
+  log("signature:", hex(sig));
+};
+</script>
