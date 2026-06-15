@@ -10,9 +10,7 @@
 #include "nvs.h"
 #include "bootloader_random.h"
 
-#include "mbedtls/hkdf.h"
-#include "mbedtls/md.h"
-#include "mbedtls/gcm.h"
+#include "psa/crypto.h"
 
 #include "monocypher.h"
 #include "monocypher-ed25519.h"
@@ -42,15 +40,71 @@ static esp_err_t nvs_get_fixed(nvs_handle_t h, const char *k, void *buf, size_t 
     return e;
 }
 
-/* ================= KDF / crypto helpers ================= */
+/* ================= KDF / crypto helpers (PSA Crypto) =================
+ * mbedTLS 4.x (TF-PSA-Crypto) drops the classic mbedtls/{gcm,md,hkdf}.h
+ * headers, so everything below goes through the PSA API.
+ */
+
+/* HMAC-SHA256 over PSA. key may be any length (HKDF uses 32-byte salt/PRK). */
+static int hmac_sha256(const uint8_t *key, size_t key_len,
+                       const uint8_t *data, size_t data_len,
+                       uint8_t out[32])
+{
+    psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_MESSAGE);
+    psa_set_key_algorithm(&attr, PSA_ALG_HMAC(PSA_ALG_SHA_256));
+    psa_set_key_type(&attr, PSA_KEY_TYPE_HMAC);
+    psa_set_key_bits(&attr, key_len * 8);
+
+    psa_key_id_t k = 0;
+    if (psa_import_key(&attr, key, key_len, &k) != PSA_SUCCESS) return -1;
+
+    size_t outlen = 0;
+    psa_status_t st = psa_mac_compute(k, PSA_ALG_HMAC(PSA_ALG_SHA_256),
+                                      data, data_len, out, 32, &outlen);
+    psa_destroy_key(k);
+    return (st == PSA_SUCCESS && outlen == 32) ? 0 : -1;
+}
+
+/* HKDF-SHA256 (RFC 5869), salt = empty (zero-filled). Output is identical to
+ * the standard, so it stays interoperable with WebCrypto/noble HKDF. */
 static int hkdf_sha256(const uint8_t *ikm, size_t ikm_len,
                        const uint8_t *info, size_t info_len,
                        uint8_t *okm, size_t okm_len)
 {
-    const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-    if (!md) return -1;
-    /* salt empty: HKDF-Extract uses a zero salt internally */
-    return mbedtls_hkdf(md, NULL, 0, ikm, ikm_len, info, info_len, okm, okm_len);
+    /* Extract: PRK = HMAC(salt=0^32, IKM) */
+    uint8_t prk[32];
+    static const uint8_t zero_salt[32] = {0};
+    if (hmac_sha256(zero_salt, 32, ikm, ikm_len, prk) != 0) return -1;
+
+    if (info_len > 256) { crypto_wipe(prk, 32); return -1; }
+
+    /* Expand: T(n) = HMAC(PRK, T(n-1) || info || n), OKM = T(1)|T(2)|... */
+    uint8_t t[32];
+    uint8_t blk[32 + 256 + 1];   /* T(prev) || info || counter */
+    size_t  t_len = 0, done = 0;
+    uint8_t counter = 1;
+    int     rc = 0;
+
+    while (done < okm_len) {
+        size_t off = 0;
+        if (t_len) { memcpy(blk, t, t_len); off += t_len; }
+        memcpy(blk + off, info, info_len); off += info_len;
+        blk[off++] = counter;
+
+        if (hmac_sha256(prk, 32, blk, off, t) != 0) { rc = -1; break; }
+        t_len = 32;
+
+        size_t take = (okm_len - done < 32) ? (okm_len - done) : 32;
+        memcpy(okm + done, t, take);
+        done += take;
+        counter++;
+    }
+
+    crypto_wipe(prk, 32);
+    crypto_wipe(t, 32);
+    crypto_wipe(blk, sizeof blk);
+    return rc;
 }
 
 /* Derive directional keys from the raw DH secret, binding to both pubkeys.
@@ -103,30 +157,59 @@ static void make_send_nonce(uint8_t nonce[12])
     for (int i = 0; i < 8; i++) nonce[4 + i] = (uint8_t)(send_ctr >> (8 * i));
 }
 
+/* AES-256-GCM via PSA. PSA writes the combined ct||tag block; callers lay out
+ * tag immediately after ct (tag == ct + n), so the combined write lands the
+ * tag in the right place and the on-wire format is unchanged. */
 static int aes_gcm_encrypt(const uint8_t key[32], const uint8_t nonce[12],
                            const uint8_t *pt, size_t n,
                            uint8_t *ct, uint8_t tag[16])
 {
-    mbedtls_gcm_context g; mbedtls_gcm_init(&g);
-    int r = mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, key, 256);
-    if (r == 0)
-        r = mbedtls_gcm_crypt_and_tag(&g, MBEDTLS_GCM_ENCRYPT, n,
-                                      nonce, 12, NULL, 0, pt, ct, 16, tag);
-    mbedtls_gcm_free(&g);
-    return r;
+    (void)tag; /* tag region is ct + n; PSA emits it as part of the output */
+    psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_ENCRYPT);
+    psa_set_key_algorithm(&attr, PSA_ALG_GCM);
+    psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&attr, 256);
+
+    psa_key_id_t k = 0;
+    if (psa_import_key(&attr, key, 32, &k) != PSA_SUCCESS) return -1;
+
+    size_t outlen = 0;
+    psa_status_t st = psa_aead_encrypt(k, PSA_ALG_GCM,
+                                       nonce, 12,
+                                       NULL, 0,        /* no AAD */
+                                       pt, n,
+                                       ct, n + 16,     /* writes ct||tag */
+                                       &outlen);
+    psa_destroy_key(k);
+    return (st == PSA_SUCCESS && outlen == n + 16) ? 0 : -1;
 }
 
+/* Decrypt: callers pass ct and tag contiguous (tag == ct + n), matching PSA's
+ * expected combined ct||tag input. */
 static int aes_gcm_decrypt(const uint8_t key[32], const uint8_t nonce[12],
                            const uint8_t *ct, size_t n, const uint8_t tag[16],
                            uint8_t *pt)
 {
-    mbedtls_gcm_context g; mbedtls_gcm_init(&g);
-    int r = mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, key, 256);
-    if (r == 0)
-        r = mbedtls_gcm_auth_decrypt(&g, n, nonce, 12, NULL, 0,
-                                     tag, 16, ct, pt);
-    mbedtls_gcm_free(&g);
-    return r; /* nonzero => auth failure */
+    (void)tag; /* tag is ct + n; PSA reads the combined ct||tag block */
+    psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_DECRYPT);
+    psa_set_key_algorithm(&attr, PSA_ALG_GCM);
+    psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&attr, 256);
+
+    psa_key_id_t k = 0;
+    if (psa_import_key(&attr, key, 32, &k) != PSA_SUCCESS) return -1;
+
+    size_t outlen = 0;
+    psa_status_t st = psa_aead_decrypt(k, PSA_ALG_GCM,
+                                       nonce, 12,
+                                       NULL, 0,        /* no AAD */
+                                       ct, n + 16,     /* ct||tag contiguous */
+                                       pt, n,
+                                       &outlen);
+    psa_destroy_key(k);
+    return (st == PSA_SUCCESS && outlen == n) ? 0 : -1; /* nonzero => auth fail */
 }
 
 /* ================= provisioning ================= */
@@ -160,6 +243,11 @@ static int provision_identity(void)
 
 int hsm_init(void)
 {
+    if (psa_crypto_init() != PSA_SUCCESS) {
+        ESP_LOGE(TAG, "psa_crypto_init failed");
+        return -1;
+    }
+
     esp_err_t e = nvs_flash_init();
     if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
