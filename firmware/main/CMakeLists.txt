@@ -7,7 +7,7 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash
-        esp_tinyusb
+        esp_driver_usb_serial_jtag
         mbedtls
         bootloader_support
         monocypher
