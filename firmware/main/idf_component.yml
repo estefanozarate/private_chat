@@ -1,0 +1,5 @@
+## Managed dependencies (ESP-IDF Component Manager).
+## monocypher is vendored locally under components/ (not from the registry).
+dependencies:
+  idf: ">=5.1"
+  espressif/esp_tinyusb: "^1.4.0"

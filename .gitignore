@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# ESP-IDF build artifacts
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# Vendored Monocypher sources (fetched via fetch.sh)
+firmware/components/monocypher/monocypher.c
+firmware/components/monocypher/monocypher.h
+firmware/components/monocypher/monocypher-ed25519.c
+firmware/components/monocypher/monocypher-ed25519.h
