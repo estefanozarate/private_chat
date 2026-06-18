@@ -28,6 +28,13 @@
   <button id="roundtrip" disabled>ENCRYPT → DECRYPT</button>
 </div>
 <div class="row">
+  <label>Cross-device DECRYPT — paste nonce / ct / tag from the OTHER device:</label>
+  <input id="dec-nonce" placeholder="nonce (24 hex chars)">
+  <input id="dec-ct" placeholder="ciphertext (hex)">
+  <input id="dec-tag" placeholder="tag (32 hex chars)">
+  <button id="decrypt" disabled>DECRYPT (paste)</button>
+</div>
+<div class="row">
   <button id="sign" disabled>SIGN_CHALLENGE (random 32B)</button>
 </div>
 
@@ -42,7 +49,7 @@ const logEl = document.getElementById("log");
 const log = (...a) => { logEl.textContent += a.join(" ") + "\n"; };
 
 const hsm = new HsmSerial();
-const enable = on => ["pub","ratchet","derive","roundtrip","sign"].forEach(id => document.getElementById(id).disabled = !on);
+const enable = on => ["pub","ratchet","derive","roundtrip","decrypt","sign"].forEach(id => document.getElementById(id).disabled = !on);
 
 document.getElementById("connect").onclick = async () => {
   try {
@@ -78,6 +85,18 @@ document.getElementById("roundtrip").onclick = async () => {
     // round-trip only works between two devices, not one. Shown for wire test.
     log("(self-decrypt will fail by design: send!=recv key — needs a second device)");
   } catch (e) { log("encrypt failed:", e.message); }
+};
+
+document.getElementById("decrypt").onclick = async () => {
+  try {
+    const nonce = fromHex(document.getElementById("dec-nonce").value);
+    const ct = fromHex(document.getElementById("dec-ct").value);
+    const tag = fromHex(document.getElementById("dec-tag").value);
+    if (nonce.length !== 12) return log("nonce must be 12 bytes (24 hex chars)");
+    if (tag.length !== 16) return log("tag must be 16 bytes (32 hex chars)");
+    const pt = await hsm.decrypt(nonce, ct, tag);
+    log("DECRYPT ok -> \"" + new TextDecoder().decode(pt) + "\"");
+  } catch (e) { log("decrypt failed:", e.message); }
 };
 
 document.getElementById("ratchet").onclick = async () => {
