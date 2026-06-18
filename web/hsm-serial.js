@@ -165,13 +165,14 @@ export class HsmSerial {
     return { x25519: payload.slice(0, 32), ed25519: payload.slice(32, 64) };
   }
 
-  // peerX25519Pub: Uint8Array(32). Returns { sendKey, recvKey } raw bytes.
+  // peerX25519Pub: Uint8Array(32). Diseno A: the HSM keeps the derived session
+  // keys internally and returns an empty OK payload — keys never leave the chip.
   async deriveSession(peerX25519Pub) {
-    const { payload } = await this._command(CMD.DERIVE_SESSION, 0, peerX25519Pub);
-    return { sendKey: payload.slice(0, 32), recvKey: payload.slice(32, 64) };
+    await this._command(CMD.DERIVE_SESSION, 0, peerX25519Pub);
+    return { ok: true };
   }
 
-  // Diseño A: device-side AEAD. Returns { nonce, ciphertext, tag }.
+  // Diseno A: device-side AEAD. Returns { nonce, ciphertext, tag }.
   async encrypt(plaintext) {
     const { payload } = await this._command(CMD.ENCRYPT, 0, plaintext);
     return {
@@ -197,32 +198,6 @@ export class HsmSerial {
     const { payload } = await this._command(CMD.SIGN_CHALLENGE, 0, challenge);
     return payload; // 64-byte Ed25519 signature
   }
-}
-
-// ---- WebCrypto helpers (Diseño B: browser-side AEAD) ----
-// Import a 32-byte key as a NON-EXTRACTABLE AES-256-GCM CryptoKey.
-export async function importSessionKey(raw32) {
-  return crypto.subtle.importKey("raw", raw32, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
-}
-
-// nonce = gen(4 LE) || counter(8 LE), mirroring the firmware layout.
-export function makeNonce(gen, counter) {
-  const n = new Uint8Array(12);
-  new DataView(n.buffer).setUint32(0, gen >>> 0, true);
-  // counter as 64-bit LE
-  let c = BigInt(counter);
-  for (let i = 0; i < 8; i++) { n[4 + i] = Number(c & 0xffn); c >>= 8n; }
-  return n;
-}
-
-export async function aeadEncrypt(cryptoKey, nonce, plaintext) {
-  const buf = await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce, tagLength: 128 }, cryptoKey, plaintext);
-  return new Uint8Array(buf); // ciphertext || tag(16)
-}
-
-export async function aeadDecrypt(cryptoKey, nonce, ctPlusTag) {
-  const buf = await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce, tagLength: 128 }, cryptoKey, ctPlusTag);
-  return new Uint8Array(buf);
 }
 
 export const _internal = { crc16, encodeFrame, FrameDecoder };

@@ -316,7 +316,6 @@ size_t hsm_handle_command(uint8_t cmd, uint8_t flags,
 
     case CMD_DERIVE_SESSION: {
         if (len != 32) return err_resp(out_cmd, out_flags, ST_BAD_LENGTH);
-        if (out_cap < 64) return err_resp(out_cmd, out_flags, ST_INTERNAL);
         uint8_t shared[32];
         crypto_x25519(shared, id_x_sk, payload);
         /* reject low-order / all-zero shared secret */
@@ -328,10 +327,10 @@ size_t hsm_handle_command(uint8_t cmd, uint8_t flags,
         ratchet_gen = 0; send_ctr = 0; have_session = true;
         if (persist_session() != 0) return err_resp(out_cmd, out_flags, ST_INTERNAL);
 
-        /* Diseño B export: send_key || recv_key (see docs for the trade-off) */
-        memcpy(out_payload,      sess_send, 32);
-        memcpy(out_payload + 32, sess_recv, 32);
-        return 64;
+        /* Diseno A: session keys NEVER leave the HSM. ENCRYPT/DECRYPT operate
+         * on sess_send/sess_recv in-chip; the host only ever sees plaintext it
+         * already holds and ciphertext. Return OK with an empty payload. */
+        return 0;
     }
 
     case CMD_ENCRYPT: {

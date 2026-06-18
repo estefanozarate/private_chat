@@ -70,9 +70,8 @@ document.getElementById("derive").onclick = async () => {
   try {
     const peer = fromHex(document.getElementById("peer").value);
     if (peer.length !== 32) return log("peer pubkey must be 32 bytes (64 hex chars)");
-    const { sendKey, recvKey } = await hsm.deriveSession(peer);
-    log("sendKey:", hex(sendKey));
-    log("recvKey:", hex(recvKey));
+    await hsm.deriveSession(peer);
+    log("session established (Diseño A: keys stay inside the HSM)");
   } catch (e) { log("derive failed:", e.message); }
 };
 
@@ -81,8 +80,8 @@ document.getElementById("roundtrip").onclick = async () => {
     const pt = new TextEncoder().encode(document.getElementById("msg").value);
     const { nonce, ciphertext, tag } = await hsm.encrypt(pt);
     log("enc nonce:", hex(nonce), "ct:", hex(ciphertext), "tag:", hex(tag));
-    // NOTE: device decrypt uses recvKey; encrypt used sendKey. A self
-    // round-trip only works between two devices, not one. Shown for wire test.
+    // NOTE: device encrypt uses sendKey; a matching decrypt needs the peer's
+    // recvKey. Use the cross-device DECRYPT box on the OTHER device.
     log("(self-decrypt will fail by design: send!=recv key — needs a second device)");
   } catch (e) { log("encrypt failed:", e.message); }
 };
